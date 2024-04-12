@@ -1,0 +1,711 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+<title>ICG WebGL &mdash; HW1</title>
+<meta http-equiv="content-type" content="text/html; charset=utf-8">
+<script src="https://ajax.googleapis.com/ajax/libs/jquery/3.5.1/jquery.min.js"></script>
+
+<script type="text/javascript" src="./js/glMatrix-0.9.5.min.js"></script>
+<script type="text/javascript" src="./js/webgl-utils.js"></script>
+
+<script type="text/javascript" src="./shaders/flat-fragment.js" id="flatFragment" type="flatVertex"></script>
+<script type="text/javascript" src="./shaders/gouraud-fragment.js" id="gouraudFragment" type="gouraudVertex"></script>
+<script type="text/javascript" src="./shaders/phong-fragment.js" id="flatFragment" type="flatVertex"></script>
+<link rel="stylesheet" href="./style.css">
+<script type="text/javascript">
+    let userConfig = {
+        "light-position": [[-50, 0 ,-60], [0, 0, 200], [50, 0 ,-60]],
+        "light-color": [[255, 0, 0], [0,255, 0], [0, 0, 255]],
+        "item": [
+            { shader: 'Flat', shear: 90, scale: [5, 5, 5], rotate:{ degree: 60, lastTime: new Date().getTime(), lastAngle: 0, autorotate: true, direction: [1, 0, 0] }, constant: { Ka: 0.1, Kd: 0.1, Ks: 0.1, Shininess: 5 }, location: [-15, 0 ,-30], model: "Csie" },
+            { shader: 'Gouraud', shear: 90, scale: [1, 1, 1], rotate:{ degree: 45, lastTime: new Date().getTime(), lastAngle: 0, autorotate: true, direction: [0, 1, 0] }, constant: { Ka: 0.1, Kd: 0.1, Ks: 0.1, Shininess: 5 }, location: [0, 0 ,-80], model: "Teapot" },
+            { shader: 'Phong', shear: 90, scale: [5, 5, 5], rotate:{ degree: 90, lastTime: new Date().getTime(), lastAngle: 0, autorotate: true, direction: [0, 0, 1] }, constant: { Ka: 0.1, Kd: 0.1, Ks: 0.1, Shininess: 5 }, location: [15, 0 ,-30], model: "Plant" }
+        ]
+    }
+
+    // common variables
+    var gl;
+    var flatShaderProgram;
+    var gouraudShaderProgram;
+    var phongShaderProgram;
+
+    // rendering method
+    var models = {};
+
+    // modeling and perspective matrixs
+    var mvMatrix = mat4.create();
+    var pMatrix  = mat4.create();
+
+    var modelVertexPositionBuffer;
+    var modelVertexNormalBuffer;
+    var modelVertexFrontColorBuffer;
+
+    // animation controls
+    var rotate_flag = false;
+    var random_light_flag = false;
+    var transparent = 1.0;
+
+    var startTime = new Date().getTime();
+    var lastTime    = 0;
+
+    var clipping_plane = -20;
+    var clip_dim = 0
+    var draw = 4;
+
+    //*************************************************
+    // Initialization functions
+    //*************************************************
+    function initGL(canvas) {
+        try {
+            gl = canvas.getContext("webgl");
+            gl.getExtension('OES_standard_derivatives');
+            gl.viewportWidth  = canvas.width;
+            gl.viewportHeight = canvas.height;
+            //console.warn( gl.viewportWidth)
+        } 
+        catch (e) {
+            console.log(e);
+        }
+
+        if (!gl) {
+            alert("Could not initialise WebGL, sorry :-(");
+
+        }
+    }
+
+    function getShader(gl, shaderSource, id) {
+        if (!shaderSource) {
+            return null;
+        }
+
+        var shader;
+        if (id == "fragment") {
+            shader = gl.createShader(gl.FRAGMENT_SHADER);
+        } 
+        else if (id == "vertex") {
+            shader = gl.createShader(gl.VERTEX_SHADER);
+        } 
+        else {
+            return null;
+        }
+
+        gl.shaderSource(shader, shaderSource);
+        gl.compileShader(shader);
+
+        if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) {
+            alert(gl.getShaderInfoLog(shader));
+            return null;
+        }
+
+        return shader;
+    }
+
+    function initShader(fragment,vertex) {
+        var fragmentShader = getShader(gl, fragment, "fragment");
+        var vertexShader   = getShader(gl, vertex, "vertex");
+
+        let shaderProgram = gl.createProgram();
+        gl.attachShader(shaderProgram, vertexShader);
+        gl.attachShader(shaderProgram, fragmentShader);
+        gl.linkProgram(shaderProgram);
+
+        if (!gl.getProgramParameter(shaderProgram, gl.LINK_STATUS)) {
+            alert("Could not initialise shaders");
+        }
+
+        gl.useProgram(shaderProgram);
+
+        shaderProgram.vertexPositionAttribute = gl.getAttribLocation(shaderProgram, "aVertexPosition");
+        gl.enableVertexAttribArray(shaderProgram.vertexPositionAttribute);
+        shaderProgram.vertexFrontColorAttribute = gl.getAttribLocation(shaderProgram, "aFrontColor");
+        gl.enableVertexAttribArray(shaderProgram.vertexFrontColorAttribute);
+        shaderProgram.vertexNormalAttribute = gl.getAttribLocation(shaderProgram, "aVertexNormal");
+        gl.enableVertexAttribArray(shaderProgram.vertexNormalAttribute);
+
+        let lightAttributes = ['lightColor1', 'lightColor2', 'lightColor3', 'lightPosition1', 'lightPosition2', 'lightPosition3']
+        lightAttributes.map((attr) => {
+            shaderProgram[attr] = gl.getUniformLocation(shaderProgram, attr);
+        })
+
+        shaderProgram.Ka  = gl.getUniformLocation(shaderProgram, "Ka");
+        shaderProgram.Kd  = gl.getUniformLocation(shaderProgram, "Kd");
+        shaderProgram.Ks  = gl.getUniformLocation(shaderProgram, "Ks");
+        shaderProgram.Shininess  = gl.getUniformLocation(shaderProgram, "Shininess");
+
+        shaderProgram.pMatrixUniform  = gl.getUniformLocation(shaderProgram, "uPMatrix");
+        shaderProgram.mvMatrixUniform = gl.getUniformLocation(shaderProgram, "uMVMatrix");
+
+        return shaderProgram;
+    }
+
+    function setMatrixUniforms(shaderProgram) {
+        gl.uniformMatrix4fv(shaderProgram.pMatrixUniform, false, pMatrix);
+        gl.uniformMatrix4fv(shaderProgram.mvMatrixUniform, false, mvMatrix);
+    }
+
+    function degToRad(degrees) {
+        return degrees * Math.PI / 180;
+    }
+
+    function handleLoaded(obj, objData) {
+        let modelVertexPositionBuffer = gl.createBuffer();
+        gl.bindBuffer(gl.ARRAY_BUFFER, modelVertexPositionBuffer);
+        gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(objData.vertexPositions), gl.STATIC_DRAW);
+        modelVertexPositionBuffer.itemSize = 3;
+        modelVertexPositionBuffer.numItems = objData.vertexPositions.length / 3;
+
+        let modelVertexNormalBuffer = gl.createBuffer();
+        gl.bindBuffer(gl.ARRAY_BUFFER, modelVertexNormalBuffer);
+        gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(objData.vertexNormals), gl.STATIC_DRAW);
+        modelVertexNormalBuffer.itemSize = 3;
+        modelVertexNormalBuffer.numItems = objData.vertexNormals.length / 3;
+
+        let modelVertexFrontColorBuffer = gl.createBuffer();
+        gl.bindBuffer(gl.ARRAY_BUFFER, modelVertexFrontColorBuffer);
+        gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(objData.vertexFrontcolors), gl.STATIC_DRAW);
+        modelVertexFrontColorBuffer.itemSize = 3;
+        modelVertexFrontColorBuffer.numItems = objData.vertexFrontcolors.length / 3;
+
+        models[obj] = {
+            modelVertexPositionBuffer: modelVertexPositionBuffer,
+            modelVertexNormalBuffer: modelVertexNormalBuffer,
+            modelVertexFrontColorBuffer: modelVertexFrontColorBuffer
+        }
+    }
+
+    function loadModel(obj) {
+        var request = new XMLHttpRequest();
+        request.open("GET", "./model/" + obj + ".json");
+        request.onreadystatechange = function () {
+            if (request.readyState == 4) {
+                let jsonObj = JSON.parse(request.responseText);
+                if (obj == "Teapot"){
+                    let vertexPositions = jsonObj.vertexPositions;
+                    let vertexBackcolors = jsonObj.vertexBackcolors;
+                    let vertexFrontcolors = jsonObj.vertexFrontcolors;
+                    let vertexNormals = jsonObj.vertexNormals;
+                    let vertexTextureCoords = jsonObj.vertexTextureCoords
+
+                    for (let i = clip_dim; i < vertexPositions.length; i += 3) { // y
+                        if (vertexPositions[i] < parseFloat(clipping_plane)) {
+                            for (j=-1; j<2; j++){
+                                vertexPositions[i + j] = 0.0;
+                                vertexNormals[i + j] = 0.0;
+                                vertexFrontcolors[i + j] = 0.0;
+                                vertexBackcolors[i + j] = 0.0;
+                                vertexTextureCoords[i + j] = 0.0;
+                            }
+                        }
+                    }
+                    jsonObj.vertexPositions = vertexPositions
+                    jsonObj.vertexBackcolors = vertexBackcolors
+                    jsonObj.vertexFrontcolors = vertexFrontcolors
+                    jsonObj.vertexNormals = vertexNormals
+                    
+                }
+                handleLoaded(obj, jsonObj);
+            }
+        }
+        request.send();
+    }
+
+    //*************************************************
+    // Rendering functions
+    //*************************************************
+
+    function drawScene() {
+        resizeCanvasToDisplaySize(gl.canvas);
+        gl.viewport(0, 0, gl.canvas.width, gl.canvas.height);
+        gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+
+        for(let i = 0; i < 3; i++){
+
+            
+        // Setup Projection Matrix
+        mat4.perspective(45, gl.viewportWidth / gl.viewportHeight, 0.2, 100.0, pMatrix);
+
+        
+        let shaderProgram = getShaderByName(userConfig['item'][i]['shader']);
+        let model = userConfig['item'][i]['model'];
+        let position = userConfig['item'][i]['location'];
+
+        if(!models.hasOwnProperty(model)){
+            continue;
+        }
+        let modelVertexPositionBuffer = models[model].modelVertexPositionBuffer;
+        let modelVertexNormalBuffer = models[model].modelVertexNormalBuffer;
+        let modelVertexFrontColorBuffer = models[model].modelVertexFrontColorBuffer;
+
+        // Setup Model-View Matrix
+        mat4.identity(mvMatrix);
+
+        mat4.translate(mvMatrix, position);
+        mat4.scale(mvMatrix, userConfig['item'][i]['scale']);
+
+        //AUTO ROTATE
+        if(userConfig['item'][i]['rotate']['autorotate']){
+            let now = new Date().getTime();
+            let elapsed = (now - userConfig['item'][i]['rotate']['lastTime']) / 1000;
+            userConfig['item'][i]['rotate']['lastTime'] = now;
+            userConfig['item'][i]['rotate']['lastAngle'] += userConfig['item'][i]['rotate']['degree'] * elapsed
+            mat4.rotate(mvMatrix, degToRad(userConfig['item'][i]['rotate']['lastAngle']), userConfig['item'][i]['rotate']['direction']);
+        }else{
+            mat4.rotate(mvMatrix, degToRad(userConfig['item'][i]['rotate']['degree']), userConfig['item'][i]['rotate']['direction']);
+        }
+
+        let shearMatrix = mat4.create();
+        mat4.identity(shearMatrix);
+        shearMatrix[4] = 1 / Math.tan(degToRad(userConfig['item'][i]['shear']));
+        mat4.multiply(mvMatrix, shearMatrix, mvMatrix); // apply shear 
+
+        // original shader
+        gl.useProgram(shaderProgram);
+        setMatrixUniforms(shaderProgram);
+
+        // Setup model position data
+        gl.bindBuffer(gl.ARRAY_BUFFER, modelVertexPositionBuffer);
+        gl.vertexAttribPointer(shaderProgram.vertexPositionAttribute, modelVertexPositionBuffer.itemSize, gl.FLOAT, false, 0, 0);
+
+        // Setup model front color data
+        gl.bindBuffer(gl.ARRAY_BUFFER, modelVertexFrontColorBuffer);
+        gl.vertexAttribPointer(shaderProgram.vertexFrontColorAttribute, modelVertexFrontColorBuffer.itemSize, gl.FLOAT, false, 0, 0);
+        
+        // Setup model vertex normal data
+        gl.bindBuffer(gl.ARRAY_BUFFER, modelVertexNormalBuffer);
+        gl.vertexAttribPointer(shaderProgram.vertexNormalAttribute, modelVertexNormalBuffer.itemSize, gl.FLOAT, false, 0, 0);
+
+        // Setup light color
+        gl.uniform3fv(shaderProgram.lightColor1, userConfig["light-color"][0]);
+        gl.uniform3fv(shaderProgram.lightColor2, userConfig["light-color"][1]);
+        gl.uniform3fv(shaderProgram.lightColor3, userConfig["light-color"][2]);
+        gl.uniform4fv(shaderProgram.lightPosition1, userConfig["light-position"][0].concat([1.0]));
+        gl.uniform4fv(shaderProgram.lightPosition2, userConfig["light-position"][1].concat([1.0]));
+        gl.uniform4fv(shaderProgram.lightPosition3, userConfig["light-position"][2].concat([1.0]));
+
+        // Setup constant
+        gl.uniform1f(shaderProgram.Ka, userConfig['item'][i]['constant']['Ka']);
+        gl.uniform1f(shaderProgram.Kd, userConfig['item'][i]['constant']['Kd']);
+        gl.uniform1f(shaderProgram.Ks, userConfig['item'][i]['constant']['Ks']);
+        gl.uniform1f(shaderProgram.Shininess, userConfig['item'][i]['constant']['Shininess']);
+                            
+        gl.drawArrays(draw, 0, modelVertexPositionBuffer.numItems);
+        }
+
+        function resizeCanvasToDisplaySize(canvas) {
+            // Lookup the size the browser is displaying the canvas in CSS pixels.
+            const displayWidth  = canvas.clientWidth;
+            const displayHeight = canvas.clientHeight;
+
+            // Check if the canvas is not the same size.
+            const needResize = canvas.width  !== displayWidth ||
+                            canvas.height !== displayHeight;
+
+            if (needResize) {
+                // Make the canvas the same size
+                canvas.width  = displayWidth;
+                canvas.height = displayHeight;
+            }
+
+            return needResize;
+        }
+    }
+
+    function tick() {
+        requestAnimFrame(tick);
+        drawScene();
+
+        gl.clearColor(0.0, 0.0, 0.0, 0.0);
+   
+        /*if(rotate_flag){
+            rotate_objects();
+        }
+
+        if(random_light_flag){
+            random_light();
+        }*/
+    }
+
+
+
+    function getShaderByName(name){
+        if(name == "Flat"){
+            return flatShaderProgram;
+        }
+        if(name == "Gouraud"){
+            return gouraudShaderProgram;
+        }
+        if(name == "Phong"){
+            return phongShaderProgram;
+        }
+        throw "Unknown Shader";
+    }
+
+    function webGLStart() {
+        var canvas = document.getElementById("ICG-canvas");
+        initGL(canvas);
+        
+        flatShaderProgram = initShader(flatFragment, flatVertex);
+        gouraudShaderProgram = initShader(gouraudFragment, gouraudVertex);
+        phongShaderProgram = initShader(phongFragment, phongVertex);
+        //celShaderProgram = initShader(celFragment, celVertex );
+        //outlineShaderProgram = initShader(outlineFragment, outlineVertex);
+        loadModel('Teapot');
+        loadModel('Csie');
+        loadModel('Plant');
+
+        gl.clearColor(0.0, 0.0, 0.0, 1.0);
+        gl.enable(gl.DEPTH_TEST);
+
+        tick();
+    }
+    //*************************************************
+    // Parsing parameters
+    //*************************************************
+    function update_mode(){
+        mode = document.getElementById("shading").value;
+        gl.uniform1i(gl.getUniformLocation(shaderProgram, "mode"), mode);
+    }
+
+    function update_ambient_light(paramid){
+        if(paramid == 0) ka = document.getElementById("am_ka").value;
+        else
+        {
+            ambiet_light_color[0] = document.getElementById("am_lR").value;
+            ambiet_light_color[1] = document.getElementById("am_lG").value;
+            ambiet_light_color[2] = document.getElementById("am_lB").value;
+        }
+    }
+
+    function update_light_location(lightid){
+        light_locations[lightid * 3] = document.getElementById(lightid + "_llocX").value;
+        light_locations[lightid * 3 + 1] = document.getElementById(lightid + "_llocY").value;
+        light_locations[lightid * 3 + 2] = document.getElementById(lightid + "_llocZ").value;
+    }
+
+    function update_light_color(lightid){
+        light_colors[lightid * 3] = document.getElementById(lightid + "_lR").value;
+        light_colors[lightid * 3 + 1] = document.getElementById(lightid + "_lG").value;
+        light_colors[lightid * 3 + 2] = document.getElementById(lightid + "_lB").value;
+    }
+    
+    function update_trans(objid){
+        var tx = document.getElementById(objid + "_transX").value;
+        var ty = document.getElementById(objid + "_transY").value;
+        var tz = document.getElementById(objid + "_transZ").value;
+        obj_vec[objid].translation_vec = vec3.create([tx, ty, tz]);
+    }
+
+    function update_rotate(objid){
+        var rx = document.getElementById(objid + "_rotateX").value;
+        var ry = document.getElementById(objid + "_rotateY").value;
+        var rz = document.getElementById(objid + "_rotateZ").value;
+        obj_vec[objid].rotate_vec = vec3.create([rx, ry, rz]);
+    }
+
+    function update_clip(objid){
+        plane = document.getElementById(objid + "_clip").value;
+        loadObj(obj_vec[objid])
+    }
+
+
+    function update_clipping_plane(dim,plane){
+        clip_dim = dim;
+        clipping_plane = parseFloat(plane);
+        //console.warn(clipping_plane)
+        webGLStart();
+    }
+
+    function update_draw(value){
+        draw = value;
+        webGLStart();
+    }
+    
+
+
+
+    function getTab(ID){
+
+        let panels = document.getElementsByClassName("panel");
+        let tabs = document.getElementsByClassName("tab");
+
+        for(var i=0 ; i<panels.length ; i++){
+            panels[i].style.display = "none";
+            tabs[i].style.backgroundColor = "#eee";
+        }
+
+        panels[ID].style.display = "grid";
+        tabs[ID].style.backgroundColor = "#009ee1f3";
+
+    }
+    
+</script>
+</head>
+
+<body onload="webGLStart();">
+    <divclass="row">
+        <div >
+            <canvas id="ICG-canvas" style="border: none; height: 100%; width: 75%; background: url('water.jpg')"></canvas>
+        </div>
+        <div style="position: absolute; margin-left: 75%; top: 0%; max-width: 30%; padding: 1%;">
+            <div >
+                <button class="tab" id="tab-0" onclick="getTab(0)" style="background-color: #009ee1f3;">Item1</button>
+                <button class="tab" id="tab-1" onclick="getTab(1)">Item2</button>
+                <button class="tab" id="tab-2" onclick="getTab(2)">Item3</button>
+                <select id="item3-draw" style="width: 35%;" onchange="update_draw(value)">
+                    <!--<option value=0>Points</option>-->
+                    <option value=1>Lines</option>
+                    <option value=2>Line_loop</option>
+                    <option selected value=4>Triangles</option>
+                    <option value=6>Triangle_fan</option>
+                </select>
+            </div>
+        
+            <div class="panel" id="panel-0" style="display: grid; margin-top: 5%;">
+                <label for="item1-shader">Shader
+                <select id="item1-shader" style="width: 40%;" >
+                    <option>Flat</option>
+                    <option>Gouraud</option>
+                    <option>Phong</option>
+                </select></label>
+
+                <label for="item1-model">Model&nbsp;
+                <select id="item1-model" style="width: 40%;">
+                    <option>Teapot</option>
+                    <option>Csie</option>
+                    <option>Car_road</option>
+                    <option>Fighter</option>
+                    <option>Longteap</option>
+                    <option>Mig27</option>
+                    <option>Plant</option>
+                    <option>Tomcat</option>
+                    <option>Church_s</option>
+                    <option>Easter</option>
+                    <option>Kangaroo</option>
+                    <option>Mercedes</option>
+                    <option>Patchair</option>
+                    <option>Hide</option>
+                </select></label>
+
+
+                <span>Scale_X&nbsp;
+                    <input type="range" id="item1-scale-x" min="0" max="10" step="0.1"> </span>
+                <span>Scale_Y&nbsp;
+                    <input type="range" id="item1-scale-y" min="0" max="10" step="0.1"> </span>
+                <span>Scale_Z&nbsp;
+                    <input type="range" id="item1-scale-z" min="0" max="10" step="0.1"> </span>
+                <span>Shear&nbsp;&nbsp;&nbsp;&nbsp;
+                    <input type="range" id="item1-shear" min="0" max="180" step="1"> </span>
+
+                <span>Rotate&nbsp;&ensp;          
+                    <!--<input type="range" id="item1-rotate" min="0" max="360" step="1"> <br/>-->
+                    <input type="radio" id="item1-rotate-direction-x" name="item1-rotate-direction" checked>&nbsp;X
+                    <input type="radio" id="item1-rotate-direction-y" name="item1-rotate-direction" >&nbsp;Y
+                    <input type="radio" id="item1-rotate-direction-z" name="item1-rotate-direction" >&nbsp;Z
+                </span>
+                
+                <span>Ka&nbsp;
+                    <input type="range" id="item1-constant-Ka" min="0" max="1" step="0.1"> </span>
+                <span>Kd&nbsp;
+                    <input type="range" id="item1-constant-Kd" min="0" max="1" step="0.1"> </span>
+                <span>Ks&nbsp;
+                    <input type="range" id="item1-constant-Ks" min="0" max="1" step="0.1"> </span>
+                <span>Shininess&nbsp;
+                    <input type="range" id="item1-constant-Shininess" min="0" max="128" step="1"> </span>
+              
+           
+
+                <span>Location_X&nbsp;
+                    <input type="number" id="item1-location-x" style="width: 20%;"/></span>
+                <span>Location_Y&nbsp;
+                    <input type="number" id="item1-location-y" style="width: 20%;"/></span>
+                <span>Location_Z&nbsp;
+                    <input type="number" id="item1-location-z" style="width: 20%;"/></span>
+            </div>
+
+            <div class="panel" id="panel-1" style="display: none; margin-top: 5%;">
+                <label for="item2-shader">Shader
+                    <select id="item2-shader" style="width: 40%;" >
+                        <option>Flat</option>
+                        <option>Gouraud</option>
+                        <option>Phong</option>
+                    </select></label>
+    
+                    <label for="item2-model">Model&nbsp;
+                    <select id="item2-model" style="width: 40%;">
+                        <option>Teapot</option>
+                        <option>Csie</option>
+                        <option>Car_road</option>
+                        <option>Fighter</option>
+                        <option>Longteap</option>
+                        <option>Mig27</option>
+                        <option>Plant</option>
+                        <option>Tomcat</option>
+                        <option>Church_s</option>
+                        <option>Easter</option>
+                        <option>Kangaroo</option>
+                        <option>Mercedes</option>
+                        <option>Patchair</option>
+                        <option>Hide</option>
+                    </select></label>
+
+
+                <span>Scale_X&nbsp;
+                    <input type="range" id="item2-scale-x" min="0" max="10" step="0.1"> </span>
+                <span>Scale_Y&nbsp;
+                    <input type="range" id="item2-scale-y" min="0" max="10" step="0.1"> </span>
+                <span>Scale_Z&nbsp;
+                    <input type="range" id="item2-scale-z" min="0" max="10" step="0.1"> </span>
+                <span>Shear&nbsp;&nbsp;&nbsp;&nbsp;
+                    <input type="range" id="item2-shear" min="0" max="180" step="1"> </span>
+
+                <span>Rotate&nbsp;&ensp;          
+                    <!--<input type="range" id="item2-rotate" min="0" max="360" step="1"> <br/>-->
+                    <input type="radio" id="item2-rotate-direction-x" name="item2-rotate-direction" >&nbsp;X
+                    <input type="radio" id="item2-rotate-direction-y" name="item2-rotate-direction" checked>&nbsp;Y
+                    <input type="radio" id="item2-rotate-direction-z" name="item2-rotate-direction" >&nbsp;Z
+                </span>
+                
+                <span>Ka&nbsp;
+                    <input type="range" id="item2-constant-Ka" min="0" max="1" step="0.1"> </span>
+                <span>Kd&nbsp;
+                    <input type="range" id="item2-constant-Kd" min="0" max="1" step="0.1"> </span>
+                <span>Ks&nbsp;
+                    <input type="range" id="item2-constant-Ks" min="0" max="1" step="0.1"> </span>
+                <span>Shininess&nbsp;
+                    <input type="range" id="item2-constant-Shininess" min="0" max="128" step="1"> </span>
+              
+           
+
+                <span>Location_X&nbsp;
+                    <input type="number" id="item2-location-x" style="width: 20%;"/></span>
+                <span>Location_Y&nbsp;
+                    <input type="number" id="item2-location-y" style="width: 20%;"/></span>
+                <span>Location_Z&nbsp;
+                    <input type="number" id="item2-location-z" style="width: 20%;"/></span>
+            </div>
+
+            <div class="panel" id="panel-1" style="display: none; margin-top: 5%;">
+                <label for="item3-shader">Shader
+                    <select id="item3-shader" style="width: 40%;" >
+                        <option>Flat</option>
+                        <option>Gouraud</option>
+                        <option>Phong</option>
+                    </select></label>
+    
+                    <label for="item3-model">Model&nbsp;
+                    <select id="item3-model" style="width: 40%;">
+                        <option>Teapot</option>
+                        <option>Csie</option>
+                        <option>Car_road</option>
+                        <option>Fighter</option>
+                        <option>Longteap</option>
+                        <option>Mig27</option>
+                        <option>Plant</option>
+                        <option>Tomcat</option>
+                        <option>Church_s</option>
+                        <option>Easter</option>
+                        <option>Kangaroo</option>
+                        <option>Mercedes</option>
+                        <option>Patchair</option>
+                        <option>Hide</option>
+                    </select></label>
+
+
+                <span>Scale_X&nbsp;
+                    <input type="range" id="item3-scale-x" min="0" max="10" step="0.1"> </span>
+                <span>Scale_Y&nbsp;
+                    <input type="range" id="item3-scale-y" min="0" max="10" step="0.1"> </span>
+                <span>Scale_Z&nbsp;
+                    <input type="range" id="item3-scale-z" min="0" max="10" step="0.1"> </span>
+                <span>Shear&nbsp;&nbsp;&nbsp;&nbsp;
+                    <input type="range" id="item3-shear" min="0" max="180" step="1"> </span>
+
+                <span>Rotate&nbsp;&ensp;          
+                    <!--<input type="range" id="item3-rotate" min="0" max="360" step="1"> <br/>-->
+                    <input type="radio" id="item3-rotate-direction-x" name="item3-rotate-direction" >&nbsp;X
+                    <input type="radio" id="item3-rotate-direction-y" name="item3-rotate-direction" >&nbsp;Y
+                    <input type="radio" id="item3-rotate-direction-z" name="item3-rotate-direction" checked>&nbsp;Z
+                </span>
+                
+                <span>Ka&nbsp;
+                    <input type="range" id="item3-constant-Ka" min="0" max="1" step="0.1"> </span>
+                <span>Kd&nbsp;
+                    <input type="range" id="item3-constant-Kd" min="0" max="1" step="0.1"> </span>
+                <span>Ks&nbsp;
+                    <input type="range" id="item3-constant-Ks" min="0" max="1" step="0.1"> </span>
+                <span>Shininess&nbsp;
+                    <input type="range" id="item3-constant-Shininess" min="0" max="128" step="1"> </span>
+              
+           
+
+                <span>Location_X&nbsp;
+                    <input type="number" id="item3-location-x" style="width: 20%;"/></span>
+                <span>Location_Y&nbsp;
+                    <input type="number" id="item3-location-y" style="width: 20%;"/></span>
+                <span>Location_Z&nbsp;
+                    <input type="number" id="item3-location-z" style="width: 20%;"/></span>
+            </div>
+
+            <div style="position: absolute; margin-top: 10%;">
+                <label>Clipping_line_X</label>
+                <input type="range" min="-25" max="25" value="-25" step="0.5" oninput="update_clipping_plane(0,value)"/>
+                <br/>
+                <label>Clipping_line_Y</label>
+                <input type="range" min="-25" max="25" value="-25" step="0.5" oninput="update_clipping_plane(1,value)"/>
+                <br/>
+                <label>Clipping_line_Z</label>
+                <input type="range" min="-25" max="25" value="-25" step="0.5" oninput="update_clipping_plane(2,value)"/>
+            </div>
+        </div>
+
+        <div>
+            <span>Light1&nbsp;
+                <input type="number" id="light1-position-x" style="width: 5%;"/></span>&nbsp;
+            <span>
+                <input type="number" id="light1-position-y" style="width: 5%;"/></span>&nbsp;
+            <span>
+                <input type="number" id="light1-position-z" style="width: 5%;"/></span>&nbsp;
+
+            <span>Color: <span id="light1-color-indicator" style="background-color: rgb(255, 0, 0); color: rgb(0, 0, 0); padding: 5px;"></span></span>
+            <input type="text" id="light1-color" value="255, 0, 0" style="width: 10%;"/>
+            <canvas id="colorCanvas1" style="width: 10%;" height="60%"></canvas>&nbsp;
+            <span>Brightness</span>
+            <input type="range" id="light1-brightness" min="0" max="128" value="40"> 
+        </div><br/>
+        <div>
+            <span>Light2&nbsp;
+                <input type="number" id="light2-position-x" style="width: 5%;"/></span>&nbsp;
+            <span>
+                <input type="number" id="light2-position-y" style="width: 5%;"/></span>&nbsp;
+            <span>
+                <input type="number" id="light2-position-z" style="width: 5%;"/></span>&nbsp;
+
+                <span>Color: <span id="light2-color-indicator" style="background-color: rgb(255, 0, 0); color: rgb(0, 0, 0); padding: 5px;"></span></span>
+                <input type="text" id="light2-color" value="255, 0, 0" style="width: 10%;"/>
+                <canvas id="colorCanvas2" style="width: 10%;" height="60%"></canvas>&nbsp;
+                <span>Brightness</span>
+                <input type="range" id="light2-brightness" min="0" max="128" value="40"> 
+        </div><br/>
+        <div>
+            <span>Light3&nbsp;
+                <input type="number" id="light3-position-x" style="width: 5%;"/></span>&nbsp;
+            <span>
+                <input type="number" id="light3-position-y" style="width: 5%;"/></span>&nbsp;
+            <span>
+                <input type="number" id="light3-position-z" style="width: 5%;"/></span>&nbsp;
+
+                <span>Color: <span id="light3-color-indicator" style="background-color: rgb(255, 0, 0); color: rgb(0, 0, 0); padding: 5px;"></span></span>
+                <input type="text" id="light3-color" value="255, 0, 0" style="width: 10%;"/>
+                <canvas id="colorCanvas3" style="width: 10%;" height="60%"></canvas>&nbsp;
+                <span>Brightness</span>
+                <input type="range" id="light3-brightness" min="0" max="128" value="40"> 
+        </div>
+           
+        <div >
+        </div>
+    </div>
+    <br/>
+    <script src="js/script.js"></script>
+</body>
+</html>
